@@ -39,7 +39,7 @@
     }
     .header-card {
       background: rgba(255, 255, 255, 0.95);
-      padding: 10px 16px;
+      padding: 10px 14px;
       border-radius: 20px;
       box-shadow: 0 4px 15px rgba(0,0,0,0.12);
       display: flex;
@@ -48,11 +48,11 @@
     }
     .app-title {
       font-weight: 800;
-      font-size: 16px;
+      font-size: 15px;
       color: #222;
       display: flex;
       align-items: center;
-      gap: 6px;
+      gap: 5px;
     }
     .status-badge {
       font-size: 11px;
@@ -60,17 +60,18 @@
       color: #1976d2;
       padding: 4px 10px;
       border-radius: 12px;
-      font-weight: 600;
+      font-weight: 700;
     }
     .filter-bar {
       display: flex;
       gap: 6px;
       justify-content: center;
+      flex-wrap: wrap;
     }
     .filter-btn {
       background: rgba(255, 255, 255, 0.95);
       border: 2px solid transparent;
-      padding: 7px 14px;
+      padding: 6px 12px;
       border-radius: 18px;
       font-size: 12px;
       font-weight: 700;
@@ -85,6 +86,17 @@
       border-color: #2196F3;
       color: #2196F3;
       background: #fff;
+    }
+    .search-here-btn {
+      background: #1976d2;
+      color: white;
+      border: none;
+      padding: 6px 12px;
+      border-radius: 18px;
+      font-size: 12px;
+      font-weight: 700;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+      cursor: pointer;
     }
     .dot {
       width: 10px;
@@ -282,11 +294,12 @@
     <div class="filter-bar">
       <button class="filter-btn active" id="btnAll">All</button>
       <button class="filter-btn" id="btnToilet">
-        <span class="dot" style="background:#FFC107;"></span>Public Toilet
+        <span class="dot" style="background:#FFC107;"></span>Toilet
       </button>
       <button class="filter-btn" id="btnShop">
-        <span class="dot" style="background:#F44336;"></span>Convenience
+        <span class="dot" style="background:#F44336;"></span>Shop
       </button>
+      <button class="search-here-btn" id="searchHereBtn">🔄 Search Here</button>
     </div>
   </div>
 
@@ -384,14 +397,17 @@
     var redIcon = createIcon('#F44336');
     var yellowIcon = createIcon('#FFC107');
 
-    var map = L.map('map', { zoomControl: false }).setView([35.681236, 139.767125], 14);
+    var userLat = 36.3188;
+    var userLng = 138.5020;
+
+    var map = L.map('map', { zoomControl: false }).setView([userLat, userLng], 14);
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
       attribution: 'OpenStreetMap'
     }).addTo(map);
 
-    var userLat = 35.681236;
-    var userLng = 139.767125;
-    var userMarker = null;
+    var userMarker = L.marker([userLat, userLng], { icon: blueIcon }).addTo(map);
+    userMarker.bindPopup("<div class='popup-title'>現在地</div><div class='popup-sub'>You are here</div>");
+
     var routingControl = null;
     var allPlaces = [];
     var currentFilter = 'all';
@@ -436,87 +452,101 @@
       updateStatus(visibleCount + " spots found");
     }
 
+    function processData(data) {
+      allPlaces.forEach(function(item) { map.removeLayer(item.marker); });
+      allPlaces = [];
+
+      if (!data.elements || data.elements.length === 0) {
+        updateStatus("0 spots nearby");
+        return;
+      }
+
+      data.elements.forEach(function(el) {
+        var pLat = el.lat || (el.center && el.center.lat);
+        var pLon = el.lon || (el.center && el.center.lon);
+        if (!pLat || !pLon) return;
+
+        var isShop = el.tags && el.tags.shop === "convenience";
+        var type = isShop ? 'shop' : 'toilet';
+        var icon = isShop ? redIcon : yellowIcon;
+
+        var brandName = (el.tags && (el.tags.name || el.tags.brand)) ? (el.tags.name || el.tags.brand) : "";
+        var titleJa = isShop ? (brandName || "コンビニ") : (brandName || "公衆トイレ・駅・公園");
+        var titleEn = isShop ? "Convenience Store" : "Public Restroom / Station";
+        var tagClass = isShop ? "tag-shop" : "tag-toilet";
+        var tagLabel = isShop ? "SHOP / 24H" : "PUBLIC RESTROOM";
+
+        var wheelchairInfo = "";
+        if (el.tags && el.tags.wheelchair === "yes") {
+          wheelchairInfo = " ♿ Accessible";
+        }
+
+        var distMeters = Math.round(map.distance([userLat, userLng], [pLat, pLon]));
+        var walkMins = Math.max(1, Math.round(distMeters / 80));
+
+        var popupHtml = `
+          <div class="popup-tag ${tagClass}">${tagLabel}${wheelchairInfo}</div>
+          <div class="popup-title">${titleJa}</div>
+          <div class="popup-sub">${titleEn}</div>
+          <div class="popup-meta">🚶 約 ${walkMins} 分 (${distMeters}m)</div>
+          <button class="route-go-btn" onclick="startRouteTo(${pLat}, ${pLon})">ここへ行く (Go Here)</button>
+        `;
+
+        var marker = L.marker([pLat, pLon], { icon: icon });
+        marker.bindPopup(popupHtml);
+
+        allPlaces.push({
+          lat: pLat,
+          lng: pLon,
+          type: type,
+          dist: distMeters,
+          marker: marker
+        });
+      });
+
+      renderMarkers();
+    }
+
     function fetchPlaces(lat, lng) {
       updateStatus("Searching...");
-      var overpassUrl = `https://overpass-api.de/api/interpreter?data=[out:json];(nwr(around:5000,${lat},${lng})["amenity"="toilets"];nwr(around:5000,${lat},${lng})["shop"="convenience"];);out center;`;
+      var query = `[out:json][timeout:15];(nwr(around:4000,${lat},${lng})["amenity"="toilets"];nwr(around:4000,${lat},${lng})["railway"="station"];nwr(around:4000,${lat},${lng})["shop"="convenience"];);out center;`;
+      var encoded = encodeURIComponent(query);
 
-      fetch(overpassUrl)
-        .then(function(res) { return res.json(); })
-        .then(function(data) {
-          allPlaces.forEach(function(item) { map.removeLayer(item.marker); });
-          allPlaces = [];
+      var url1 = "https://overpass-api.de/api/interpreter?data=" + encoded;
+      var url2 = "https://overpass.kumi.systems/api/interpreter?data=" + encoded;
 
-          if (!data.elements || data.elements.length === 0) {
-            updateStatus("No spots nearby");
-            return;
-          }
-
-          data.elements.forEach(function(el) {
-            var pLat = el.lat || (el.center && el.center.lat);
-            var pLon = el.lon || (el.center && el.center.lon);
-            if (!pLat || !pLon) return;
-
-            var isShop = el.tags && el.tags.shop === "convenience";
-            var type = isShop ? 'shop' : 'toilet';
-            var icon = isShop ? redIcon : yellowIcon;
-
-            var brandName = (el.tags && (el.tags.name || el.tags.brand)) ? (el.tags.name || el.tags.brand) : "";
-            var titleJa = isShop ? (brandName || "コンビニ") : (brandName || "公衆トイレ");
-            var titleEn = isShop ? "Convenience Store" : "Public Restroom";
-            var tagClass = isShop ? "tag-shop" : "tag-toilet";
-            var tagLabel = isShop ? "SHOP / 24H" : "PUBLIC FREE";
-
-            var wheelchairInfo = "";
-            if (el.tags && el.tags.wheelchair === "yes") {
-              wheelchairInfo = " ♿ Accessible";
-            }
-
-            var distMeters = Math.round(map.distance([userLat, userLng], [pLat, pLon]));
-            var walkMins = Math.max(1, Math.round(distMeters / 80));
-
-            var popupHtml = `
-              <div class="popup-tag ${tagClass}">${tagLabel}${wheelchairInfo}</div>
-              <div class="popup-title">${titleJa}</div>
-              <div class="popup-sub">${titleEn}</div>
-              <div class="popup-meta">🚶 約 ${walkMins} 分 (${distMeters}m)</div>
-              <button class="route-go-btn" onclick="startRouteTo(${pLat}, ${pLon})">ここへ行く (Go Here)</button>
-            `;
-
-            var marker = L.marker([pLat, pLon], { icon: icon });
-            marker.bindPopup(popupHtml);
-
-            allPlaces.push({
-              lat: pLat,
-              lng: pLon,
-              type: type,
-              dist: distMeters,
-              marker: marker
-            });
-          });
-
-          renderMarkers();
+      fetch(url1)
+        .then(function(res) {
+          if (!res.ok) throw new Error("Fallback");
+          return res.json();
         })
+        .then(processData)
         .catch(function() {
-          updateStatus("Server busy");
+          fetch(url2)
+            .then(function(res) { return res.json(); })
+            .then(processData)
+            .catch(function() {
+              updateStatus("Tap Search Here");
+            });
         });
     }
 
     function initLocation() {
+      fetchPlaces(userLat, userLng);
+
       if (navigator.geolocation) {
         navigator.geolocation.getCurrentPosition(function(pos) {
           userLat = pos.coords.latitude;
           userLng = pos.coords.longitude;
           map.setView([userLat, userLng], 14);
-
-          if (userMarker) map.removeLayer(userMarker);
-          userMarker = L.marker([userLat, userLng], { icon: blueIcon }).addTo(map);
-          userMarker.bindPopup("<div class='popup-title'>現在地</div><div class='popup-sub'>You are here</div>");
-
+          userMarker.setLatLng([userLat, userLng]);
           fetchPlaces(userLat, userLng);
         }, function() {
-          updateStatus("GPS Off");
-          userMarker = L.marker([userLat, userLng], { icon: blueIcon }).addTo(map);
-          fetchPlaces(userLat, userLng);
+          updateStatus("GPS Off (Default Area)");
+        }, {
+          enableHighAccuracy: true,
+          timeout: 6000,
+          maximumAge: 0
         });
       }
     }
@@ -536,12 +566,17 @@
     document.getElementById('btnToilet').addEventListener('click', function() { setFilter('toilet', 'btnToilet'); });
     document.getElementById('btnShop').addEventListener('click', function() { setFilter('shop', 'btnShop'); });
 
+    document.getElementById('searchHereBtn').addEventListener('click', function() {
+      var center = map.getCenter();
+      fetchPlaces(center.lat, center.lng);
+    });
+
     document.getElementById('nearestBtn').addEventListener('click', function() {
       var candidates = allPlaces.filter(function(item) {
         return currentFilter === 'all' || currentFilter === item.type;
       });
       if (candidates.length === 0) {
-        alert("周辺にスポットが見つからないよ！");
+        alert("周辺にスポットが見つからないよ！上の Search Here を押してみてね。");
         return;
       }
       candidates.sort(function(a, b) { return a.dist - b.dist; });
@@ -560,8 +595,20 @@
     });
 
     document.getElementById('locateBtn').addEventListener('click', function() {
-      map.setView([userLat, userLng], 15);
-      if (userMarker) userMarker.openPopup();
+      if (navigator.geolocation) {
+        updateStatus("Locating...");
+        navigator.geolocation.getCurrentPosition(function(pos) {
+          userLat = pos.coords.latitude;
+          userLng = pos.coords.longitude;
+          map.setView([userLat, userLng], 15);
+          userMarker.setLatLng([userLat, userLng]);
+          userMarker.openPopup();
+          fetchPlaces(userLat, userLng);
+        }, function() {
+          map.setView([userLat, userLng], 15);
+          userMarker.openPopup();
+        });
+      }
     });
 
     document.getElementById('guideBtn').addEventListener('click', function() {
